@@ -116,11 +116,65 @@ pipeline {
                 }
             }
         }
+
+        stage('Déploiement staging') {
+            when { branch 'main' }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE'),
+                                 file(credentialsId: 'ansible-vault-pass', variable: 'VAULT_PASS_FILE')]) {
+                    sh '''
+                        export K8S_AUTH_KUBECONFIG="$KUBECONFIG_FILE"
+                        cd ansible
+                        ansible-playbook deploy.yml -e target_env=staging -e app_version=$TAG \
+                            --vault-password-file "$VAULT_PASS_FILE"
+                    '''
+                }
+            }
+        }
+
+        stage('Validation production') {
+            when { branch 'main' }
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    input message: "Déployer ${env.TAG} en production ?", ok: 'Déployer en production'
+                }
+            }
+        }
+
+        stage('Déploiement production') {
+            when { branch 'main' }
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE'),
+                                 file(credentialsId: 'ansible-vault-pass', variable: 'VAULT_PASS_FILE')]) {
+                    sh '''
+                        export K8S_AUTH_KUBECONFIG="$KUBECONFIG_FILE"
+                        cd ansible
+                        ansible-playbook deploy.yml -e target_env=prod -e app_version=$TAG \
+                            --vault-password-file "$VAULT_PASS_FILE"
+                    '''
+                }
+            }
+        }
     }
 
     post {
         always {
             sh 'docker rmi $IMAGE:$TAG || true'
+        }
+        failure {
+            script {
+                if (env.BRANCH_NAME == 'main') {
+                    try {
+                        withCredentials([string(credentialsId: 'discord-webhook', variable: 'HOOK')]) {
+                            httpRequest url: HOOK, httpMode: 'POST', contentType: 'APPLICATION_JSON',
+                                        requestBody: "{\"content\": \"Pipeline en échec : ${env.JOB_NAME} #${env.BUILD_NUMBER}\"}",
+                                        quiet: true
+                        }
+                    } catch (err) {
+                        echo "Notification non envoyée : ${err.getMessage()}"
+                    }
+                }
+            }
         }
         cleanup {
             cleanWs()
